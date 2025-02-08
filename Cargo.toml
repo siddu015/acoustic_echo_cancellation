@@ -5,3 +5,4 @@ edition = "2024"
 
 [dependencies]
 cpal = "0.15"
+anyhow = "1.0.95"
