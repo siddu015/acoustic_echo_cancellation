@@ -31,10 +31,12 @@ fn main() -> Result<(), anyhow::Error> {
     // Create buffers to store the reference (speaker) and microphone signals
     let reference_buffer: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(Vec::new()));
     let microphone_buffer: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(Vec::new()));
+    let cleaned_audio_buffer: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(Vec::new()));
 
     // Clone the buffers for use in the input and output streams
     let reference_buffer_clone = Arc::clone(&reference_buffer);
     let microphone_buffer_clone = Arc::clone(&microphone_buffer);
+    let cleaned_audio_buffer_clone = Arc::clone(&cleaned_audio_buffer);
 
     // Initialize the adaptive filter (NLMS)
     let filter_length = 256; // Length of the adaptive filter
@@ -44,9 +46,11 @@ fn main() -> Result<(), anyhow::Error> {
     let output_stream = output_device.build_output_stream(
         &output_config.config(),
         move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-            // Store the reference signal (audio being played through the speakers)
-            let mut reference = reference_buffer_clone.lock().unwrap();
-            reference.extend_from_slice(data);
+            // Play the cleaned audio from the cleaned_audio_buffer
+            let mut cleaned_audio = cleaned_audio_buffer_clone.lock().unwrap();
+            let len = data.len().min(cleaned_audio.len());
+            data[..len].copy_from_slice(&cleaned_audio[..len]);
+            cleaned_audio.drain(..len);
         },
         move |err| {
             eprintln!("Output stream error: {}", err);
@@ -67,12 +71,9 @@ fn main() -> Result<(), anyhow::Error> {
             if reference.len() >= filter_length && microphone.len() >= filter_length {
                 let echo_cancelled = filter.process(&reference, &microphone);
 
-                // Play back the cleaned audio through the speakers
-                for (i, sample) in echo_cancelled.iter().enumerate() {
-                    if i < data.len() {
-                        data[i] = *sample;
-                    }
-                }
+                // Store the cleaned audio in the cleaned_audio_buffer
+                let mut cleaned_audio = cleaned_audio_buffer.lock().unwrap();
+                cleaned_audio.extend_from_slice(&echo_cancelled);
 
                 // Clear the buffers to avoid overflow
                 reference.drain(..filter_length);
