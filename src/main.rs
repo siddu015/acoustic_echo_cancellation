@@ -1,5 +1,5 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{Arc, Mutex};
 
 fn main() -> Result<(), anyhow::Error> {
     // Initialize the default host for audio I/O
@@ -36,6 +36,10 @@ fn main() -> Result<(), anyhow::Error> {
     let reference_buffer_clone = Arc::clone(&reference_buffer);
     let microphone_buffer_clone = Arc::clone(&microphone_buffer);
 
+    // Initialize the adaptive filter (NLMS)
+    let filter_length = 256; // Length of the adaptive filter
+    let mut filter = NlmsFilter::new(filter_length, 0.1); // Step size = 0.1
+
     // Build the output stream (speakers)
     let output_stream = output_device.build_output_stream(
         &output_config.config(),
@@ -43,7 +47,6 @@ fn main() -> Result<(), anyhow::Error> {
             // Store the reference signal (audio being played through the speakers)
             let mut reference = reference_buffer_clone.lock().unwrap();
             reference.extend_from_slice(data);
-            println!("Output stream callback: {} samples added", data.len()); // Debugging
         },
         move |err| {
             eprintln!("Output stream error: {}", err);
@@ -58,6 +61,23 @@ fn main() -> Result<(), anyhow::Error> {
             // Store the microphone signal (audio captured by the microphone)
             let mut microphone = microphone_buffer_clone.lock().unwrap();
             microphone.extend_from_slice(data);
+
+            // Perform echo cancellation
+            let mut reference = reference_buffer.lock().unwrap();
+            if reference.len() >= filter_length && microphone.len() >= filter_length {
+                let echo_cancelled = filter.process(&reference, &microphone);
+
+                // Play back the cleaned audio through the speakers
+                for (i, sample) in echo_cancelled.iter().enumerate() {
+                    if i < data.len() {
+                        data[i] = *sample;
+                    }
+                }
+
+                // Clear the buffers to avoid overflow
+                reference.drain(..filter_length);
+                microphone.drain(..filter_length);
+            }
         },
         move |err| {
             eprintln!("Input stream error: {}", err);
@@ -73,14 +93,54 @@ fn main() -> Result<(), anyhow::Error> {
 
     // Keep the program running to allow audio processing
     loop {
-        // Periodically print the buffer sizes for debugging
-        let reference = reference_buffer.lock().unwrap();
-        let microphone = microphone_buffer.lock().unwrap();
-        println!(
-            "Reference buffer size: {}, Microphone buffer size: {}",
-            reference.len(),
-            microphone.len(),
-        );
         std::thread::sleep(std::time::Duration::from_secs(1));
+    }
+}
+
+// NLMS Adaptive Filter Implementation
+struct NlmsFilter {
+    filter_length: usize,
+    step_size: f32,
+    weights: Vec<f32>,
+}
+
+impl NlmsFilter {
+    fn new(filter_length: usize, step_size: f32) -> Self {
+        Self {
+            filter_length,
+            step_size,
+            weights: vec![0.0; filter_length],
+        }
+    }
+
+    fn process(&mut self, reference: &[f32], microphone: &[f32]) -> Vec<f32> {
+        let mut output = Vec::new();
+        for i in 0..microphone.len() {
+            // Predict the echo using the adaptive filter
+            let predicted_echo = self.predict(&reference[i..i + self.filter_length]);
+            // Subtract the predicted echo from the microphone signal
+            let cleaned_sample = microphone[i] - predicted_echo;
+            output.push(cleaned_sample);
+            // Update the filter weights
+            self.update(&reference[i..i + self.filter_length], microphone[i]);
+        }
+        output
+    }
+
+    fn predict(&self, reference: &[f32]) -> f32 {
+        reference
+            .iter()
+            .zip(self.weights.iter())
+            .map(|(x, w)| x * w)
+            .sum()
+    }
+
+    fn update(&mut self, reference: &[f32], error: f32) {
+        let norm = reference.iter().map(|x| x * x).sum::<f32>();
+        if norm > 0.0 {
+            for (w, x) in self.weights.iter_mut().zip(reference.iter()) {
+                *w += self.step_size * error * x / norm;
+            }
+        }
     }
 }
