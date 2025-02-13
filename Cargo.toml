@@ -6,3 +6,5 @@ edition = "2024"
 [dependencies]
 cpal = "0.15"
 hound = "3.5.0"
+ndarray = "0.16.1"
+rustfft = "6.2.0"
