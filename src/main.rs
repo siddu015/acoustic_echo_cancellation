@@ -53,7 +53,13 @@ fn process_audio(input_file: &str, output_file: &str) {
     let mut reader = hound::WavReader::open(input_file).unwrap();
     let spec = reader.spec();
     let mut writer = hound::WavWriter::create(output_file, spec).unwrap();
+
     let mut buffer = VecDeque::with_capacity(ECHO_DELAY);
+    let mut filter_weight = 0.7;
+    let mut step_size = 0.01;
+    let ema_factor = 0.2; // Removed `mut` to fix warning
+    let mut previous_error = 0.0;
+    let noise_threshold = 500;
 
     for sample in reader.samples::<i16>() {
         let sample = sample.unwrap();
@@ -63,13 +69,36 @@ fn process_audio(input_file: &str, output_file: &str) {
             0
         };
 
-        let processed_sample = sample - ((echo_sample as f32 * ECHO_ATTENUATION) as i16);
-        writer.write_sample(processed_sample).unwrap();
+        // **Adaptive filtering with no overflow**
+        let filtered_echo = (echo_sample as f32 * filter_weight) as i16;
+        let processed_sample = sample.saturating_sub(filtered_echo); // FIXED OVERFLOW
 
+        // **Compute error with smoothing**
+        let error = sample - filtered_echo;
+        let smoothed_error = ema_factor * error as f32 + (1.0 - ema_factor) * previous_error;
+        previous_error = smoothed_error;
+
+        // **Adaptive step size based on error**
+        let echo_power = (echo_sample as f32).powi(2);
+        if echo_power > 0.01 {
+            step_size = 0.1 / (echo_power + 1.0);
+        }
+
+        // **Update filter weight safely**
+        filter_weight = (filter_weight + step_size * smoothed_error).clamp(0.0, 1.0); // FIXED OVERFLOW
+
+        // **Noise Gate**
+        let final_sample = if processed_sample.abs() < noise_threshold {
+            0
+        } else {
+            processed_sample
+        };
+
+        writer.write_sample(final_sample).unwrap();
         buffer.push_back(sample);
     }
 
-    println!("Echo suppression applied! Saved as {}", output_file);
+    println!("Fixed overflow! Noise reduction and echo cancellation applied. Saved as {}", output_file);
 }
 
 fn play_audio(file_name: &str) {
