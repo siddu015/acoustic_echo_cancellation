@@ -1,17 +1,18 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use hound;
-use std::sync::{Arc, Mutex};
 use std::fs::File;
 use std::io::BufReader;
+use std::collections::VecDeque;
+
+const FILE_NAME: &str = "recorded.wav";
+const PROCESSED_FILE: &str = "processed.wav";
+const ECHO_DELAY: usize = 4410; // ~100ms delay at 44.1kHz
+const ECHO_ATTENUATION: f32 = 0.5;
 
 fn record_audio(file_name: &str, duration_secs: u64) {
     let host = cpal::default_host();
     let device = host.default_input_device().expect("No input device found");
-    println!("Using input device: {}", device.name().unwrap());
-
     let config = device.default_input_config().unwrap();
-    println!("Input format: {:?}", config);
-
     let sample_rate = config.sample_rate().0;
     let channels = config.channels();
 
@@ -22,7 +23,8 @@ fn record_audio(file_name: &str, duration_secs: u64) {
         sample_format: hound::SampleFormat::Int,
     };
 
-    let writer = Arc::new(Mutex::new(hound::WavWriter::create(file_name, spec).unwrap()));
+    let writer = hound::WavWriter::create(file_name, spec).unwrap();
+    let writer = std::sync::Arc::new(std::sync::Mutex::new(writer));
 
     let writer_clone = writer.clone();
     let stream = device.build_input_stream(
@@ -35,31 +37,49 @@ fn record_audio(file_name: &str, duration_secs: u64) {
             }
         },
         move |err| {
-            eprintln!("Error occurred: {}", err);
+            eprintln!("Error: {}", err);
         },
         None,
     ).unwrap();
 
     stream.play().unwrap();
-
-    println!("Recording... Speak into the microphone! Press Ctrl+C to stop.");
+    println!("Recording for {} seconds...", duration_secs);
     std::thread::sleep(std::time::Duration::from_secs(duration_secs));
 
     println!("Recording complete! Saved as {}", file_name);
 }
 
+fn process_audio(input_file: &str, output_file: &str) {
+    let mut reader = hound::WavReader::open(input_file).unwrap();
+    let spec = reader.spec();
+    let mut writer = hound::WavWriter::create(output_file, spec).unwrap();
+    let mut buffer = VecDeque::with_capacity(ECHO_DELAY);
+
+    for sample in reader.samples::<i16>() {
+        let sample = sample.unwrap();
+        let echo_sample = if buffer.len() >= ECHO_DELAY {
+            buffer.pop_front().unwrap_or(0)
+        } else {
+            0
+        };
+
+        let processed_sample = sample - ((echo_sample as f32 * ECHO_ATTENUATION) as i16);
+        writer.write_sample(processed_sample).unwrap();
+
+        buffer.push_back(sample);
+    }
+
+    println!("Echo suppression applied! Saved as {}", output_file);
+}
+
 fn play_audio(file_name: &str) {
     let host = cpal::default_host();
     let device = host.default_output_device().expect("No output device found");
-    println!("Using output device: {}", device.name().unwrap());
-
     let file = File::open(file_name).unwrap();
-    let mut reader = hound::WavReader::new(BufReader::new(file)).unwrap();
-
-    let config = device.default_output_config().unwrap();
+    let mut reader = hound::WavReader::new(BufReader::new(file)).unwrap(); // Make reader mutable
 
     let stream = device.build_output_stream(
-        &config.into(),
+        &device.default_output_config().unwrap().into(),
         move |output: &mut [f32], _: &cpal::OutputCallbackInfo| {
             for (sample, out) in reader.samples::<i16>().zip(output.iter_mut()) {
                 *out = sample.unwrap() as f32 / i16::MAX as f32;
@@ -72,15 +92,14 @@ fn play_audio(file_name: &str) {
     ).unwrap();
 
     stream.play().unwrap();
-    println!("Playing audio...");
-
-    std::thread::sleep(std::time::Duration::from_secs(5)); // Adjust as needed
+    println!("Playing processed audio...");
+    std::thread::sleep(std::time::Duration::from_secs(10));
 }
 
 fn main() {
-    let file_name = "output.wav";
-    let duration_secs = 5;
+    let duration_secs = 10;
 
-    record_audio(file_name, duration_secs);
-    play_audio(file_name);
+    record_audio(FILE_NAME, duration_secs);
+    process_audio(FILE_NAME, PROCESSED_FILE);
+    play_audio(PROCESSED_FILE);
 }
