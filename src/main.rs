@@ -1,10 +1,8 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use hound;
-use rustfft::{FftPlanner, num_complex::Complex};
-use std::sync::Arc;
+use ndarray::{Array1, s};
 use std::fs::File;
 use std::io::BufReader;
-use std::collections::VecDeque;
 
 const FILE_NAME: &str = "recorded.wav";
 const PROCESSED_FILE: &str = "processed.wav";
@@ -59,51 +57,35 @@ fn process_audio(input_file: &str, output_file: &str) {
     let samples: Vec<i16> = reader.samples::<i16>().map(|s| s.unwrap()).collect();
     let mut buffer: Vec<f32> = samples.iter().map(|&s| s as f32).collect();
 
-    let fft_size = 1024;
-    let mut planner = FftPlanner::<f32>::new();
-    let fft = planner.plan_fft_forward(fft_size);
-    let ifft = planner.plan_fft_inverse(fft_size);
+    let filter_len = 2048; // Increased filter length
+    let mut mu = 0.002; // Lower learning rate for better convergence
+    let mut weights = Array1::<f32>::zeros(filter_len);
+    let mut input_buffer = Array1::<f32>::zeros(filter_len);
 
-    let mut complex_buffer: Vec<Complex<f32>> = vec![Complex { re: 0.0, im: 0.0 }; fft_size];
+    for i in filter_len..buffer.len() {
+        let prev_input = input_buffer.clone();
 
-    for chunk in buffer.chunks_mut(fft_size) {
-        let len = chunk.len();
-        for i in 0..len {
-            complex_buffer[i] = Complex {
-                re: chunk[i],
-                im: 0.0,
-            };
-        }
+        // Shift input buffer
+        input_buffer.slice_mut(s![1..]).assign(&prev_input.slice(s![..filter_len - 1]));
+        input_buffer[0] = buffer[i - filter_len];
 
-        // Apply FFT
-        fft.process(&mut complex_buffer);
+        let echo_estimate = weights.dot(&prev_input);
+        let error = buffer[i] - echo_estimate;
 
-        // Apply Echo Cancellation in Frequency Domain
-        for bin in &mut complex_buffer {
-            let magnitude = bin.norm();
-            if magnitude > 500.0 {
-                *bin *= 0.5; // Reduce echo
-            }
-        }
+        // Power normalization to stabilize updates
+        let power = prev_input.dot(&prev_input) + 1e-6;
+        let adaptive_mu = mu / (1.0 + power);
 
-        // Apply Inverse FFT
-        ifft.process(&mut complex_buffer);
-
-        // Convert back to time domain
-        for i in 0..len {
-            chunk[i] = complex_buffer[i].re;
-        }
+        weights += &(adaptive_mu * error * &prev_input);
+        buffer[i] = error;
     }
 
-    // Save the processed audio
     for &sample in &buffer {
         writer.write_sample(sample as i16).unwrap();
     }
 
-    println!("Echo reduced using FFT! Saved as {}", output_file);
-}
-
-fn play_audio(file_name: &str) {
+    println!("Adaptive echo cancellation applied! Saved as {}", output_file);
+}fn play_audio(file_name: &str) {
     let host = cpal::default_host();
     let device = host.default_output_device().expect("No output device found");
     let file = File::open(file_name).unwrap();
