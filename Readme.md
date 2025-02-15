@@ -4,14 +4,6 @@ This project demonstrates how to build a **Real-Time Acoustic Echo Cancellation 
 
 ---
 
-## **Features**
-
-- **Record Audio**: Capture audio from your microphone and save it as a `.wav` file.
-- **Process Audio**: Apply adaptive filtering to remove echoes from the recorded audio.
-- **Play Audio**: Play back the processed audio to hear the results.
-
----
-
 ## **How It Works**
 
 1. **Recording**: The program captures audio from your microphone using the `cpal` crate and saves it as a `.wav` file.
